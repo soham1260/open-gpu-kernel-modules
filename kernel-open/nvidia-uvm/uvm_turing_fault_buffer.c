@@ -87,7 +87,10 @@ void uvm_hal_turing_disable_replayable_faults(uvm_parent_gpu_t *parent_gpu)
 NvU32 uvm_hal_turing_fault_buffer_read_put(uvm_parent_gpu_t *parent_gpu)
 {
     NvU32 put = UVM_GPU_READ_ONCE(*parent_gpu->fault_buffer.rm_info.replayable.pFaultBufferPut);
+    // UVM_GPU_READ_ONCE reads 32-bit memory-mapped register (MMIO) over the PCIe bus once, storing the raw register value in put
     NvU32 index = READ_HWVALUE(put, _PFB_PRI_MMU, FAULT_BUFFER_PUT, PTR);
+    // 32-bit register value is not just a simple number, it is packed with multiple hardware status bitfields.
+    // The helper macro READ_HWVALUE extracts, masks, and shifts this PTR field out of the raw 32-bit register value
     UVM_ASSERT(READ_HWVALUE(put, _PFB_PRI_MMU, FAULT_BUFFER_PUT, GETPTR_CORRUPTED) ==
                NV_PFB_PRI_MMU_FAULT_BUFFER_PUT_GETPTR_CORRUPTED_NO);
 
@@ -407,7 +410,7 @@ NV_STATUS uvm_hal_turing_fault_buffer_parse_replayable_entry(uvm_parent_gpu_t *p
     UVM_ASSERT(parent_gpu->fault_buffer_hal->entry_is_valid(parent_gpu, index));
 
     fault_entry = get_fault_buffer_entry(parent_gpu, index);
-
+    // Takes the logical circular queue INDEX and converts it to the actual mapped CPU virtual address of the raw entry in the physical buffer.
     // When Confidential Computing is enabled, faults are encrypted by RM, so
     // they need to be decrypted before they can be parsed
     if (g_uvm_global.conf_computing_enabled) {

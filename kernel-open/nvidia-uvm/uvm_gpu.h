@@ -180,6 +180,8 @@ struct uvm_service_block_context_struct
         // servicing. We need one mask per processor because we may coalesce
         // faults that trigger migrations to different processors.
         uvm_page_mask_t new_residency;
+        
+        // a similar uvm_processor_mask_t resident; is also there in va block
     } per_processor_masks[UVM_ID_MAX_PROCESSORS];
 
     // State used by the VA block routines called by the servicing routine
@@ -354,13 +356,13 @@ typedef struct
 
     // Maximum number of faults to be processed in batch before fetching new
     // entries from the GPU buffer
-    NvU32 max_batch_size;
+    NvU32 max_batch_size; // Max faults processed in a batch
 
     struct uvm_replayable_fault_buffer_struct
     {
         // Maximum number of faults entries that can be stored in the buffer
-        NvU32 max_faults;
-
+        NvU32 max_faults; // Max faults that can be stored in the buffer itself not just batch
+        // rm_info actually contains total size of this buffer in bytes and UVM dynamically calculates max_faults from it using size of a single fault entry for current GPU's architecute of gpu as size     
         // Cached value of the GPU GET register to minimize the round-trips
         // over PCIe
         NvU32 cached_get;

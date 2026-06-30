@@ -258,13 +258,15 @@ static NV_STATUS uvm_isr_top_half(const NvProcessorUuid *gpu_uuid)
     // us noticing.
     uvm_spin_lock_irqsave(&parent_gpu->isr.interrupts_lock);
 
-    ++parent_gpu->isr.interrupt_count;
+    ++parent_gpu->isr.interrupt_count; // Interrupt Counter increase in uvm_isr_info_t // access counter 
 
     num_handlers_scheduled += schedule_replayable_faults_handler(parent_gpu);
     num_handlers_scheduled += uvm_parent_gpu_schedule_non_replayable_faults_handler(parent_gpu);
     for (i = 0; i < parent_gpu->rm_info.accessCntrBufferCount; i++)
         num_handlers_scheduled += schedule_access_counters_handler(parent_gpu, i);
-
+    // Each of these returns 1 if a bottom-half kthread item was successfully scheduled,
+    // and 0 if not (either because no work is pending, or the handler's mutex is already
+    // locked because it's already running).
     if (num_handlers_scheduled == 0) {
         if (parent_gpu->isr.is_suspended)
             status = NV_ERR_NO_INTR_PENDING;
@@ -276,7 +278,7 @@ static NV_STATUS uvm_isr_top_half(const NvProcessorUuid *gpu_uuid)
 
     uvm_parent_gpu_kref_put(parent_gpu);
 
-    return status;
+    return status; // NV_OK is set default unless override by above conditions
 }
 
 NV_STATUS uvm_isr_top_half_entry(const NvProcessorUuid *gpu_uuid)

@@ -11492,6 +11492,8 @@ static void uvm_va_block_get_prefetch_hint(uvm_va_block_t *va_block,
 
     // Performance heuristics policy: we only consider prefetching when there
     // are migrations to a single processor, only.
+
+    // Prefetching is done only when there is migration of pages to a single processor.
     if (uvm_processor_mask_get_count(&service_context->resident_processors) == 1) {
         uvm_page_index_t page_index;
         uvm_page_mask_t *new_residency_mask;
@@ -11503,8 +11505,8 @@ static void uvm_va_block_get_prefetch_hint(uvm_va_block_t *va_block,
         // due to faults
         uvm_perf_prefetch_get_hint_va_block(va_block,
                                             service_context->block_context,
-                                            new_residency,
-                                            new_residency_mask,
+                                            new_residency, // the single new resident processor
+                                            new_residency_mask, // that processors mask with pages to be migrated
                                             service_context->region,
                                             &service_context->prefetch_bitmap_tree,
                                             &service_context->prefetch_hint);
@@ -11512,7 +11514,7 @@ static void uvm_va_block_get_prefetch_hint(uvm_va_block_t *va_block,
         // Obtain the prefetch hint and give a fake fault access type to the
         // prefetched pages
         if (UVM_ID_IS_VALID(service_context->prefetch_hint.residency)) {
-            const uvm_page_mask_t *prefetch_pages_mask = &service_context->prefetch_hint.prefetch_pages_mask;
+            const uvm_page_mask_t *prefetch_pages_mask = &service_context->prefetch_hint.prefetch_pages_mask; // This is the mask that was filled by prefetch hint not original mask
 
             for_each_va_block_page_in_mask(page_index, prefetch_pages_mask, va_block) {
                 UVM_ASSERT(!uvm_page_mask_test(new_residency_mask, page_index));
@@ -11529,7 +11531,7 @@ static void uvm_va_block_get_prefetch_hint(uvm_va_block_t *va_block,
                 }
             }
 
-            uvm_page_mask_or(new_residency_mask, new_residency_mask, prefetch_pages_mask);
+            uvm_page_mask_or(new_residency_mask, new_residency_mask, prefetch_pages_mask); // prefetch mask OR with original mask 
             service_context->region = uvm_va_block_region_from_mask(va_block, new_residency_mask);
         }
     }
@@ -12042,15 +12044,18 @@ NV_STATUS uvm_va_block_service_locked(uvm_processor_id_t processor_id,
         uvm_assert_rwsem_locked(&va_space->lock);
     else
         uvm_assert_rwsem_locked_read(&va_space->lock);
-
+    // Now here you have new resident processors in block_context->resident_processors 
+    // and pages to be migrated in in those processors in block_context->per_processor_masks[uvm_id_value(new_residency)].new_residency
+    
     uvm_va_block_get_prefetch_hint(va_block,
                                    uvm_va_policy_get_region(va_block, service_context->region),
-                                   service_context);
-
+                                   service_context); // THE SAME MASK IS FILLED USING PREFETCHING HINTS 
+    // uvm_va_block_get_prefetch_hint is where prefetching happens.
     for_each_id_in_mask(new_residency, &service_context->resident_processors) {
+        // It loops over all target processors in the resident_processors mask (the processors where pages need to be made resident)
         if (uvm_va_block_is_hmm(va_block)) {
             status = uvm_hmm_va_block_service_locked(processor_id,
-                                                     new_residency,
+                                                     new_residency, // the mask that specifies NEW PAGES to exist on this device
                                                      va_block,
                                                      block_retry,
                                                      service_context);
@@ -12061,10 +12066,16 @@ NV_STATUS uvm_va_block_service_locked(uvm_processor_id_t processor_id,
         }
 
         status = uvm_va_block_service_copy(processor_id, new_residency, va_block, block_retry, service_context);
+        // Allocates physical pages on the destination processor (new_residency).
+        // Copies the memory data from the source processor to the destination processor.
+        // Handles read-duplication copies and conducts ECC / NVLink hardware error verification.
+        // Computes page permissions (Read-Only, Read-Write, Atomic) and writes the page table entries (PTEs) to map the pages on the requesting processor.
         if (status != NV_OK)
             break;
 
         status = uvm_va_block_service_finish(processor_id, va_block, service_context);
+        // Updates the driver's software structures tracking page residency.
+        // Revokes (downgrades/invalidates) permissions on the old page locations to maintain cache coherence.
         if (status != NV_OK)
             break;
     }
@@ -12443,6 +12454,7 @@ static NV_STATUS block_cpu_fault_locked(uvm_va_block_t *va_block,
                                                   UVM_SERVICE_OPERATION_REPLAYABLE_FAULTS,
                                                   hmm_migratable,
                                                   &read_duplicate);
+    // This new_residency is for the INDIVIDUAL PAGE, not the entire block
 
     // Initialize the minimum necessary state in the fault service context
     uvm_processor_mask_zero(&service_context->resident_processors);

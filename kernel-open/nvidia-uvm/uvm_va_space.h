@@ -185,6 +185,14 @@ typedef struct
 
 struct uvm_va_space_struct
 {
+
+    int pid;
+    char comm[16];
+
+    long long coalesced_replayable_faults;
+    long long raw_replayable_faults;
+    long long unique_replayable_faults;
+    long long batch_count;
     // Mask of gpus registered with the va space
     uvm_processor_mask_t registered_gpus;
 

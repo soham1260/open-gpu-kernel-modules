@@ -211,6 +211,7 @@ static void uvm_release_va_space(struct file *filp, uvm_va_space_t *va_space)
     // an option. Instead, the teardown work normally performed synchronously
     // needs to be scheduled to run after uvm_resume() releases the lock.
     if (uvm_down_read_trylock(&g_uvm_global.pm.lock)) {
+        printk(KERN_INFO "NVIDIA-UVM CUSTOM: Context released by Process [%s] (PID: %d): Total raw faults: %lld, Total coalesced faults: %lld, Unique faults: %lld, Batch count: %lld\n",va_space->comm, va_space->pid, va_space->raw_replayable_faults, va_space->coalesced_replayable_faults, va_space->unique_replayable_faults, va_space->batch_count);
         uvm_va_space_destroy(va_space);
         uvm_up_read(&g_uvm_global.pm.lock);
     }
@@ -957,6 +958,11 @@ static NV_STATUS uvm_api_initialize(UVM_INITIALIZE_PARAMS *params, struct file *
             }
 
             uvm_fd_type_set(filp, UVM_FD_VA_SPACE, va_space);
+            
+            va_space->pid = uvm_get_stale_process_id();
+            memcpy(va_space->comm, current->comm, sizeof(va_space->comm));
+            va_space->comm[sizeof(va_space->comm)-1] = '\0';
+            printk(KERN_INFO "NVIDIA-UVM CUSTOM: Context initialized by Process [%s] (PID: %d)\n", va_space->comm, va_space->pid);
             break;
 
         case UVM_FD_VA_SPACE:

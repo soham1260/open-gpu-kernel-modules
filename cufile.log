@@ -1,0 +1,6 @@
+ 16-06-2026 16:36:33:605 [pid=9888 tid=9888] NOTICE  cufio-drv:1160 running in compatible mode
+ 16-06-2026 16:36:34:467 [pid=9888 tid=9888] NOTICE  cufio-drv:938 GPU deviceid: 0 ( NVIDIA GeForce RTX 3050 Laptop GPU ) no native GDS - compat mode only
+ 16-06-2026 17:01:41:972 [pid=8285 tid=8285] NOTICE  cufio-drv:1160 running in compatible mode
+ 16-06-2026 17:01:42:829 [pid=8285 tid=8285] NOTICE  cufio-drv:938 GPU deviceid: 0 ( NVIDIA GeForce RTX 3050 Laptop GPU ) no native GDS - compat mode only
+ 16-06-2026 17:24:01:678 [pid=13762 tid=13762] NOTICE  cufio-drv:1160 running in compatible mode
+ 16-06-2026 17:24:02:562 [pid=13762 tid=13762] NOTICE  cufio-drv:938 GPU deviceid: 0 ( NVIDIA GeForce RTX 3050 Laptop GPU ) no native GDS - compat mode only

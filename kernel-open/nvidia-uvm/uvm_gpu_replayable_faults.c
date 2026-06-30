@@ -847,6 +847,7 @@ static NV_STATUS fetch_fault_buffer_entries(uvm_parent_gpu_t *parent_gpu,
     UVM_ASSERT(uvm_sem_is_locked(&parent_gpu->isr.replayable_faults.service_lock));
 
     fault_cache = batch_context->fault_cache;
+    // At line 167, this is initialized to actual size of hardware size buffer not just batch size(256)
 
     get = replayable_faults->cached_get;
 
@@ -1026,6 +1027,10 @@ static NV_STATUS translate_instance_ptrs(uvm_parent_gpu_t *parent_gpu,
         // copy over the already-translated va_space and move on.
         if (i != 0 && cmp_fault_instance_ptr(current_entry, batch_context->ordered_fault_cache[i - 1]) == 0) {
             current_entry->va_space = batch_context->ordered_fault_cache[i - 1]->va_space;
+            if (current_entry->va_space) {
+                current_entry->va_space->coalesced_replayable_faults++;
+                current_entry->va_space->raw_replayable_faults += current_entry->num_instances;
+            }
             current_entry->gpu = batch_context->ordered_fault_cache[i - 1]->gpu;
             continue;
         }
@@ -1095,6 +1100,10 @@ static NV_STATUS translate_instance_ptrs(uvm_parent_gpu_t *parent_gpu,
         else {
             UVM_ASSERT(current_entry->va_space);
             UVM_ASSERT(current_entry->gpu);
+            if (current_entry->va_space) {
+                current_entry->va_space->coalesced_replayable_faults++;
+                current_entry->va_space->raw_replayable_faults += current_entry->num_instances;
+            }
         }
     }
 
@@ -1417,8 +1426,15 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
          i < batch_context->num_coalesced_faults &&
          ordered_fault_cache[i]->va_space == va_space &&
          ordered_fault_cache[i]->gpu == gpu &&
-         ordered_fault_cache[i]->fault_address <= end;
-         ++i) {
+         ordered_fault_cache[i]->fault_address <= end; // End is boundary of current block, this loop runs for block
+         ++i)
+    // 
+    // Because the cache is already sorted by va_space, gpu, and fault_address, 
+    // the loop naturally stops as soon as it encounters an entry belonging 
+    // to a different process/process boundary, a different GPU, or an address 
+    // beyond the end of this va_block.
+    // 
+    {
         uvm_fault_buffer_entry_t *current_entry = ordered_fault_cache[i];
         const uvm_fault_buffer_entry_t *previous_entry = NULL;
         bool read_duplicate;
@@ -1439,6 +1455,7 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
         current_entry->is_throttled        = false;
         current_entry->is_invalid_prefetch = false;
 
+        // Check if current_entry is a duplicate of the previous entry.
         if (i > first_fault_index) {
             previous_entry = ordered_fault_cache[i - 1];
             is_duplicate = check_fault_entry_duplicate(current_entry, previous_entry);
@@ -1457,6 +1474,9 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
         }
 
         // Service the most intrusive fault per page, only. Waive the rest
+        // If it is a duplicate of a previously resolved, non-fatal fault, it 
+        // propagates necessary tracking flags and skips it (continue;) 
+        // because the page is already planned for servicing.
         if (is_duplicate) {
             fault_entry_duplicate_flags(batch_context, current_entry, previous_entry);
 
@@ -1465,6 +1485,12 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
             if (!previous_entry->is_fatal)
                 continue;
         }
+        // From here only first duplicate fault is considered due to above check
+        // Since the list is sorted with the most intrusive access type first, the first
+        // entry handles the page service, and all subsequent duplicates to the same VA
+        // are safely ignored.
+        if (block_context->num_retries == 0)
+            va_space->unique_replayable_faults++;
 
         // Ensure that the migratability iterator covers the current fault
         // address
@@ -1540,10 +1566,14 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
                                                       &read_duplicate);
 
         if (!uvm_processor_mask_test_and_set(&block_context->resident_processors, new_residency))
-            uvm_page_mask_zero(&block_context->per_processor_masks[uvm_id_value(new_residency)].new_residency);
+            uvm_page_mask_zero(&block_context->per_processor_masks[uvm_id_value(new_residency)].new_residency); // zero the mask
+            // Whenever a processor is first added to the resident_processors mask during a service run, its corresponding new_residency mask is fully zeroed out
 
+        // For a CURRENT PAGE you have now calculated its new "residency".
+        // There is one 512-bit new_residency mask for every possible processor (CPU, GPU 0, GPU 1, etc.) in the system.
+        // This is different from per processor tracking state uvm_va_block_gpu_state_t *gpus[UVM_ID_MAX_GPUS]; in va block
         uvm_page_mask_set(&block_context->per_processor_masks[uvm_id_value(new_residency)].new_residency, page_index);
-
+        // Only the specific pages targeted in the current servicing run are set in the mask not all the pages(like pages already resident)
         if (read_duplicate) {
             if (block_context->read_duplicate_count++ == 0)
                 uvm_page_mask_zero(&block_context->read_duplicate_mask);
@@ -1566,6 +1596,7 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
     if (page_fault_count > 0) {
         block_context->region = uvm_va_block_region(first_page_index, last_page_index + 1);
         status = uvm_va_block_service_locked(gpu->id, va_block, va_block_retry, block_context);
+        // This function internally calls to uvm_va_block_get_prefetch_hint
     }
 
     *block_faults = i - first_fault_index;
@@ -1960,7 +1991,7 @@ static NV_STATUS service_fault_batch_dispatch(uvm_va_space_t *va_space,
     else
         status = NV_ERR_INVALID_ADDRESS;
 
-    if (status == NV_OK) {
+    if (status == NV_OK) { // Called for UVM AND HMM BOTH
         status = service_fault_batch_block(gpu, va_block, batch_context, fault_index, hmm_migratable, block_faults);
     }
     else if ((status == NV_ERR_INVALID_ADDRESS) && uvm_ats_can_service_faults(gpu_va_space, mm)) {
@@ -2239,6 +2270,10 @@ static NV_STATUS service_fault_batch(uvm_parent_gpu_t *parent_gpu,
         if (current_entry->va_space != va_space) {
             if (prev_gpu_va_space) {
                 // TLB entries are invalidated per GPU VA space
+
+                // Every mapped page range is accumulated into ats_invalidate->tlb_batch
+                // flush all the accumulated translations before moving to next va_space
+                // Check UVM doc for details of flush, search "uvm_ats_invalidate_tlbs"
                 status = uvm_ats_invalidate_tlbs(prev_gpu_va_space, ats_invalidate, &batch_context->tracker);
                 if (status != NV_OK)
                     goto fail;
@@ -2265,6 +2300,19 @@ static NV_STATUS service_fault_batch(uvm_parent_gpu_t *parent_gpu,
             uvm_va_block_context_init(va_block_context, mm);
 
             uvm_va_space_down_read(va_space);
+
+            // fetch_fault_buffer_entries already merged CONSECUTIVE fault entries for the same instance_ptr
+            // but it did not merge same entries that are not consecutive.
+            // Later preprocess_fault_batch:
+                // 1. Sorts entries based on instance_ptr
+                // 2. Translates instance_ptr to va_space and gpu
+                // 3. Sorts by va_space, gpu, FAULT_ADDRESS and access type
+            // Finally we are in service_fault_batch, entries are already sorted by va_space(process) and gpu.
+            
+            // Every time we enter this if block, we are guarenteed to have a new va_space which corresponds to new process.
+            // So this if block is executed once per process per batch
+        
+            va_space->batch_count++;
         }
 
         // Some faults could be already fatal if they cannot be handled by
@@ -2887,7 +2935,8 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
             num_batches >= uvm_perf_fault_max_batches_per_service) {
             break;
         }
-
+        // Get and put can be literally thousands of entries apart
+        // In a batch we can only 256 fault entries at a time and a bottom half at a time will process uvm_perf_fault_max_batches_per_service
         batch_context->num_invalid_prefetch_faults = 0;
         batch_context->num_duplicate_faults        = 0;
         batch_context->num_replays                 = 0;

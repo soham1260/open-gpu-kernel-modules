@@ -167,9 +167,19 @@ static void grow_fault_granularity(uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
                                    const uvm_page_mask_t *faulted_pages,
                                    const uvm_page_mask_t *thrashing_pages)
 {
-    const uvm_page_index_t pages_per_big_page = UVM_BIG_PAGE_SIZE / PAGE_SIZE;
+    const uvm_page_index_t pages_per_big_page = UVM_BIG_PAGE_SIZE / PAGE_SIZE; // 16 pages in a 64KB big page, ALREADY SET
     uvm_page_index_t page_index;
 
+    // max_prefetch_region may not start or end on a clean 64KB boundary
+    // Normally in for Standard Managed Memory (non-HMM), the max_prefetch_region is retrieved via uvm_va_block_region_from_block(va_block) (line 403), which covers the entire 2MB VA block. Since 2MB is a multiple of 64KB (2048KB / 64KB = 32), the block start and block end are perfectly aligned to 64KB big page boundaries. 
+    // So, the prefix and suffix checks evaluate to false (their sizes are 0), so those code blocks are completely skipped.
+
+    // Prefix: The misaligned fragment at the start of the region (before the first 64KB-aligned page).
+    // Main Big Pages: The aligned 64KB blocks in the middle.
+    // Suffix: The misaligned fragment at the end of the region (after the last 64KB-aligned page).
+
+
+    // If the entire allowed region is smaller than 64KB or fails to align anywhere, the function treats the entire region as a single unit and attempts to grow it.
     // Migrate whole block if no big pages and no page in it is thrashing
     if (!big_pages_region.outer) {
         grow_fault_granularity_if_no_thrashing(bitmap_tree,
@@ -180,6 +190,7 @@ static void grow_fault_granularity(uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
         return;
     }
 
+    // Entire prefix is marked
     // Migrate whole "prefix" if no page in it is thrashing
     if (big_pages_region.first > max_prefetch_region.first) {
         uvm_va_block_region_t prefix_region = uvm_va_block_region(max_prefetch_region.first, big_pages_region.first);
@@ -195,9 +206,10 @@ static void grow_fault_granularity(uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
     for (page_index = big_pages_region.first;
          page_index < big_pages_region.outer;
          page_index += pages_per_big_page) {
+        // Iterates over va block in chunks of 16 pages (64KB)
         uvm_va_block_region_t big_region = uvm_va_block_region(page_index,
                                                                page_index + pages_per_big_page);
-
+        // In the current batch of 16 pages, if a page faulted, then the whole batch is migrated.
         grow_fault_granularity_if_no_thrashing(bitmap_tree,
                                                big_region,
                                                max_prefetch_region.first,
@@ -205,6 +217,7 @@ static void grow_fault_granularity(uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
                                                thrashing_pages);
     }
 
+    // Entire suffix is marked
     // Migrate whole "suffix" if no page in it is thrashing
     if (big_pages_region.outer < max_prefetch_region.outer) {
         uvm_va_block_region_t suffix_region = uvm_va_block_region(big_pages_region.outer,
@@ -402,7 +415,7 @@ static NvU32 uvm_perf_prefetch_prenotify_fault_migrations(uvm_va_block_t *va_blo
     //   is valid and does not match the new residency), unless confidential
     //   computing is enabled.
     if (uvm_processor_mask_empty(&va_block->resident) &&
-        uvm_id_equal(new_residency, policy->preferred_location)) {
+        uvm_id_equal(new_residency, policy->preferred_location)) {//Block has no resident pages anywhere, directly allocate and fill it
         uvm_page_mask_region_fill(prefetch_pages, max_prefetch_region);
     }
     else if (should_apply_prefetch_logic(policy, new_residency, va_block, va_block_context, faulted_pages)) {
@@ -494,7 +507,7 @@ void uvm_perf_prefetch_get_hint_va_block(uvm_va_block_t *va_block,
                                          uvm_perf_prefetch_hint_t *out_hint)
 {
     uvm_va_space_t *va_space = uvm_va_block_get_va_space(va_block);
-    uvm_page_mask_t *prefetch_pages = &out_hint->prefetch_pages_mask;
+    uvm_page_mask_t *prefetch_pages = &out_hint->prefetch_pages_mask; // The mask which will be filled with prefetch pages
     NvU32 pending_prefetch_pages;
 
     uvm_assert_rwsem_locked(&va_space->lock);
