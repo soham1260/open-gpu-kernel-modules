@@ -153,7 +153,7 @@ unsigned uvm_parent_gpu_schedule_non_replayable_faults_handler(uvm_parent_gpu_t 
 
     return 1;
 }
-
+// notif_buf_index is basically GPU id, normally not needed unless MiG
 static unsigned schedule_access_counters_handler(uvm_parent_gpu_t *parent_gpu, NvU32 notif_buf_index)
 {
     uvm_assert_spinlock_locked(&parent_gpu->isr.interrupts_lock);

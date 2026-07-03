@@ -288,8 +288,19 @@ typedef struct
     } prefetch_state;
 } uvm_ats_fault_context_t;
 
+#define UVM_FAULT_BATCH_MAX_UNIQUE_VA_SPACES 5
+
 struct uvm_fault_service_batch_context_struct
 {
+
+    struct {
+        uvm_va_space_t *va_space;
+        NvU32 raw_faults;
+        NvU32 coalesced_faults;
+        NvU32 unique_faults;
+    } per_va_space_faults[UVM_FAULT_BATCH_MAX_UNIQUE_VA_SPACES];
+
+    NvU32 num_va_spaces_in_batch;
     // Array of elements fetched from the GPU fault buffer. The number of
     // elements in this array is exactly max_batch_size
     uvm_fault_buffer_entry_t *fault_cache;

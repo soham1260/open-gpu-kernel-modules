@@ -1006,6 +1006,30 @@ static int cmp_sort_fault_entry_by_va_space_gpu_address_access_type(const void *
     return cmp_access_type((*a)->fault_access_type, (*b)->fault_access_type);
 }
 
+// Find or insert a va_space in the per_va_space_faults array of the batch context 
+// Returns the index into per_va_space_faults or -1 if the array is full and the va_space was not already tracked
+static int batch_context_find_or_add_va_space(uvm_fault_service_batch_context_t *batch_context,
+                                              uvm_va_space_t *va_space)
+{
+    NvU32 i;
+
+    for (i = 0; i < batch_context->num_va_spaces_in_batch; i++) {
+        if (batch_context->per_va_space_faults[i].va_space == va_space)
+            return i;
+    }
+
+    if (batch_context->num_va_spaces_in_batch >= UVM_FAULT_BATCH_MAX_UNIQUE_VA_SPACES)
+        return -1;
+
+    i = batch_context->num_va_spaces_in_batch++;
+    batch_context->per_va_space_faults[i].va_space = va_space;
+    batch_context->per_va_space_faults[i].raw_faults = 0;
+    batch_context->per_va_space_faults[i].coalesced_faults = 0;
+    batch_context->per_va_space_faults[i].unique_faults = 0;
+
+    return i;
+}
+
 // Translate all instance pointers to a VA space and GPU instance. Since the
 // buffer is ordered by instance_ptr, we minimize the number of translations.
 //
@@ -1030,6 +1054,13 @@ static NV_STATUS translate_instance_ptrs(uvm_parent_gpu_t *parent_gpu,
             if (current_entry->va_space) {
                 current_entry->va_space->coalesced_replayable_faults++;
                 current_entry->va_space->raw_replayable_faults += current_entry->num_instances;
+
+                int idx;
+                idx = batch_context_find_or_add_va_space(batch_context, current_entry->va_space);
+                if (idx >= 0) {
+                    batch_context->per_va_space_faults[idx].coalesced_faults++;
+                    batch_context->per_va_space_faults[idx].raw_faults += current_entry->num_instances;
+                }
             }
             current_entry->gpu = batch_context->ordered_fault_cache[i - 1]->gpu;
             continue;
@@ -1103,6 +1134,13 @@ static NV_STATUS translate_instance_ptrs(uvm_parent_gpu_t *parent_gpu,
             if (current_entry->va_space) {
                 current_entry->va_space->coalesced_replayable_faults++;
                 current_entry->va_space->raw_replayable_faults += current_entry->num_instances;
+
+                int idx;
+                idx = batch_context_find_or_add_va_space(batch_context, current_entry->va_space);
+                if (idx >= 0) {
+                    batch_context->per_va_space_faults[idx].coalesced_faults++;
+                    batch_context->per_va_space_faults[idx].raw_faults += current_entry->num_instances;
+                }
             }
         }
     }
@@ -1490,7 +1528,14 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
         // entry handles the page service, and all subsequent duplicates to the same VA
         // are safely ignored.
         if (block_context->num_retries == 0)
+        {
             va_space->unique_replayable_faults++;
+
+            int idx;
+            idx = batch_context_find_or_add_va_space(batch_context, va_space);
+            if (idx >= 0)
+                batch_context->per_va_space_faults[idx].unique_faults++;
+        }
 
         // Ensure that the migratability iterator covers the current fault
         // address
@@ -2943,6 +2988,7 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
         batch_context->fatal_va_space              = NULL;
         batch_context->fatal_gpu                   = NULL;
         batch_context->has_throttled_faults        = false;
+        batch_context->num_va_spaces_in_batch      = 0; // reset fault stats for batch 
 
         status = fetch_fault_buffer_entries(parent_gpu, batch_context, FAULT_FETCH_MODE_BATCH_READY);
         if (status != NV_OK)
@@ -3023,6 +3069,20 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
         if (batch_context->has_throttled_faults)
             ++num_throttled;
 
+        // printing PER PROCESS fault stats for this batch
+        NvU32 vs;
+        for (vs = 0; vs < batch_context->num_va_spaces_in_batch; vs++) {
+            uvm_va_space_t *vs_space = batch_context->per_va_space_faults[vs].va_space;
+            if (vs_space) {
+                printk(KERN_INFO "[NVIDIA-UVM CUSTOM BATCH STATS] batch_id=%u pid=%d comm=%s raw=%u coalesced=%u unique=%u\n",
+                               batch_context->batch_id,
+                               vs_space->pid,
+                               vs_space->comm,
+                               batch_context->per_va_space_faults[vs].raw_faults,
+                               batch_context->per_va_space_faults[vs].coalesced_faults,
+                               batch_context->per_va_space_faults[vs].unique_faults);
+            }
+        }
         ++num_batches;
     }
 

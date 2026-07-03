@@ -11316,6 +11316,11 @@ static uvm_processor_id_t block_select_processor_residency(uvm_va_block_t *va_bl
     //
     // Here, we keep it on the current residency and we just add the missing
     // mapping.
+
+    // All 3 below can get remote mapping to a GPU
+
+    // cudaMemAdvise(ptr, size, cudaMemAdviseSetAccessedBy, gpu)
+    // Read above comment
     if (uvm_processor_mask_test(&policy->accessed_by, processor_id) &&
         uvm_processor_mask_test(&va_space->accessible_from[uvm_id_value(closest_resident_processor)], processor_id) &&
         operation != UVM_SERVICE_OPERATION_ACCESS_COUNTERS) {
@@ -11324,12 +11329,14 @@ static uvm_processor_id_t block_select_processor_residency(uvm_va_block_t *va_bl
 
     // Check if we should map the closest resident processor remotely on atomic
     // fault
+    // When GPU A does an atomic on a page resident on GPU B, and GPU A has native atomic access to GPU B's memory (via NVLink), UVM keeps the page on GPU B and maps it remotely.
     if (map_remote_on_atomic_fault(va_space, access_type_mask, processor_id, closest_resident_processor))
         return closest_resident_processor;
 
     // If the processor has access to the preferred location, and the page is
     // not resident on the accessing processor, move it to the preferred
     // location.
+    // If a page's preferred location is set to the CPU (or another GPU), and the faulting GPU can access it remotely, UVM migrates it to the preferred location — NOT THE FAULTING GPU. The faulting GPU then accesses it remotely.
     if (!uvm_id_equal(closest_resident_processor, processor_id) &&
         UVM_ID_IS_VALID(preferred_location) &&
         uvm_processor_mask_test(&va_space->accessible_from[uvm_id_value(preferred_location)], processor_id))
@@ -11418,6 +11425,9 @@ static int block_select_node_residency(uvm_va_block_t *va_block,
     return current_nid;
 }
 
+// This is called by multiple types like replayable faults, cpu faults, etc
+// In this file the cpu fault one calls
+// Move to replayable faults from here
 uvm_processor_id_t uvm_va_block_select_residency(uvm_va_block_t *va_block,
                                                  uvm_va_block_context_t *va_block_context,
                                                  uvm_page_index_t page_index,
@@ -12020,6 +12030,9 @@ NV_STATUS uvm_va_block_service_finish(uvm_processor_id_t processor_id,
     return NV_OK;
 }
 
+// This is called by multiple types like replayable faults, cpu faults, etc
+// In this file the cpu fault one calls
+// Move to replayable faults from here
 NV_STATUS uvm_va_block_service_locked(uvm_processor_id_t processor_id,
                                       uvm_va_block_t *va_block,
                                       uvm_va_block_retry_t *block_retry,
