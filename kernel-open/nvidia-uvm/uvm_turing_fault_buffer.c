@@ -132,7 +132,7 @@ void uvm_hal_turing_fault_buffer_write_get(uvm_parent_gpu_t *parent_gpu, NvU32 i
 
     // Clear the GETPTR_CORRUPTED and OVERFLOW bits.
     get |= HWCONST(_PFB_PRI_MMU, FAULT_BUFFER_GET, GETPTR_CORRUPTED, CLEAR) |
-           HWCONST(_PFB_PRI_MMU, FAULT_BUFFER_GET, OVERFLOW, CLEAR);
+           HWCONST(_PFB_PRI_MMU, FAULT_BUFFER_GET, OVERFLOW, CLEAR); // GPU will pause everything once set OVERFLOW bit once put catches up to get and set the flag, unset it
     UVM_GPU_WRITE_ONCE(*parent_gpu->fault_buffer.rm_info.replayable.pFaultBufferGet, get);
 }
 
@@ -436,6 +436,11 @@ NV_STATUS uvm_hal_turing_fault_buffer_parse_replayable_entry(uvm_parent_gpu_t *p
 
     // Automatically clear valid bit for the entry in the fault buffer
     parent_gpu->fault_buffer_hal->entry_clear_valid(parent_gpu, index);
+
+    // REMEMBER even if gpu increments PUT, the entries may be yet to arrive
+    // We saw this in uvm_gpu_replayable_faults.c line 886-894 UVM_SPIN_WHILE(!parent_gpu->fault_buffer_hal->entry_is_valid(parent_gpu, get), &spin)
+    // Driver waits for valid bits to be set before accessing them
+    // So after reading entry you EXPLICITLY clear the bit so that when driver comes back at this index after a round, it should not mistakenly access it thinking the old stale entry is valid
 
     return NV_OK;
 }

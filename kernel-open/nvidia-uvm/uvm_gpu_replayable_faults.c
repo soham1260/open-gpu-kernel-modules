@@ -504,7 +504,7 @@ static NV_STATUS push_replay_on_gpu(uvm_gpu_t *gpu,
         tracker = &batch_context->tracker;
 
     status = uvm_push_begin_acquire(gpu->channel_manager, UVM_CHANNEL_TYPE_MEMOPS, tracker, &push,
-                                    "Replaying faults");
+                                    "Replaying faults"); // acquire pushbuffer
     if (status != NV_OK)
         return status;
 
@@ -857,6 +857,15 @@ static NV_STATUS fetch_fault_buffer_entries(uvm_parent_gpu_t *parent_gpu,
 
     put = replayable_faults->cached_put;
 
+    // if (batch_context->batch_id == 0 && get != put) 
+    // {
+    //     printk(KERN_INFO "NVIDIA-UVM CUSTOM: [REPLAY-EXP] ADVANCING GET:%u -> PUT:%u IN HW, BATCH:%u\n", get, put, batch_context->batch_id);
+    //     write_get(parent_gpu, put);       // advances cached_get AND writes HW register
+    //     get = put;
+    //     // replayable_faults->cached_put is still valid (== put)
+    //     goto done;  // returns num_cached_faults = 0
+    // }
+
     batch_context->is_single_instance_ptr = true;
     batch_context->last_fault = NULL;
 
@@ -869,7 +878,7 @@ static NV_STATUS fetch_fault_buffer_entries(uvm_parent_gpu_t *parent_gpu,
         batch_context->utlbs[utlb_id].has_fatal_faults = false;
     }
     batch_context->max_utlb_id = 0;
-
+    // printk(KERN_INFO "NVIDIA-UVM CUSTOM: REGISTERS GET:%d, PUT:%d, BATCH:%u",get,put,batch_context->batch_id);
     if (get == put)
         goto done;
 
@@ -884,10 +893,11 @@ static NV_STATUS fetch_fault_buffer_entries(uvm_parent_gpu_t *parent_gpu,
         // become valid, we have to do it individually since entries can be
         // written out of order
         UVM_SPIN_WHILE(!parent_gpu->fault_buffer_hal->entry_is_valid(parent_gpu, get), &spin) {
+            // printk(KERN_INFO "NVIDIA-UVM CUSTOM: WAITING GET:%d, PUT:%d, BATCH:%u",get,put,batch_context->batch_id);
             // We have some entry to work on. Let's do the rest later.
             if (fetch_mode == FAULT_FETCH_MODE_BATCH_READY && fault_index > 0)
                 goto done;
-
+            // If you already fetched some entries (fault_index > 0), break and do not wait, WE CAN ALWAYS TRY AGAIN IN NEXT BATCH
             status = uvm_global_get_status();
             if (status != NV_OK)
                 goto done;
@@ -900,6 +910,7 @@ static NV_STATUS fetch_fault_buffer_entries(uvm_parent_gpu_t *parent_gpu,
         status = parent_gpu->fault_buffer_hal->parse_replayable_entry(parent_gpu, get, current_entry);
         if (status != NV_OK)
             goto done;
+        // printk(KERN_INFO "NVIDIA-UVM CUSTOM: REGISTERS GET:%d, PUT:%d, BATCH:%u, ADDRESS:%llu",get,put,batch_context->batch_id, current_entry->fault_address);
 
         // The GPU aligns the fault addresses to 4k, but all of our tracking is
         // done in PAGE_SIZE chunks which might be larger.
@@ -959,12 +970,12 @@ static NV_STATUS fetch_fault_buffer_entries(uvm_parent_gpu_t *parent_gpu,
     next_fault:
         ++fault_index;
         ++get;
-        if (get == replayable_faults->max_faults)
+        if (get == replayable_faults->max_faults) // Circular buffer, reset get
             get = 0;
     }
 
 done:
-    write_get(parent_gpu, get);
+    write_get(parent_gpu, get); // When all entries are fetched, write to GPU
 
     batch_context->num_cached_faults = fault_index;
     batch_context->num_coalesced_faults = num_coalesced_faults;
@@ -1573,7 +1584,7 @@ static NV_STATUS service_fault_batch_block_locked(uvm_gpu_t *gpu,
                                                 gpu->id,
                                                 uvm_fault_access_type_to_prot(service_access_type)))
             continue;
-
+            // 
         thrashing_hint = uvm_perf_thrashing_get_hint(va_block,
                                                      block_context->block_context,
                                                      current_entry->fault_address,
@@ -1688,8 +1699,8 @@ static NV_STATUS service_fault_batch_block(uvm_gpu_t *gpu,
                                                                         hmm_migratable,
                                                                         block_faults));
 
-    tracker_status = uvm_tracker_add_tracker_safe(&batch_context->tracker, &va_block->tracker);
-
+    tracker_status = uvm_tracker_add_tracker_safe(&batch_context->tracker, &va_block->tracker); // add tracker
+// both are of uvm_tracker_t type, add one to another
     uvm_mutex_unlock(&va_block->lock);
 
     if (uvm_va_block_is_hmm(va_block))
@@ -2973,6 +2984,7 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
     uvm_fault_service_batch_context_t *batch_context = &replayable_faults->batch_service_context;
 
     uvm_tracker_init(&batch_context->tracker);
+    ++batch_context->service_id;
 
     // Process all faults in the buffer
     while (1) {
@@ -2993,6 +3005,24 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
         status = fetch_fault_buffer_entries(parent_gpu, batch_context, FAULT_FETCH_MODE_BATCH_READY);
         if (status != NV_OK)
             break;
+
+        // if (batch_context->num_cached_faults == 0) 
+        // {
+        //     // === REPLAYABILITY EXPERIMENT ===
+        //     // If batch_id is still 0 it means we intentionally skipped all entries.
+        //     // Issue a replay so the GPU re-deposits faults at new PUT indices.
+        //     if (batch_context->batch_id == 0) {
+        //         printk(KERN_INFO "NVIDIA-UVM CUSTOM: [REPLAY-EXP] issuing replay after batch 0 skip\n");
+        //         status = push_replay_on_parent_gpu(parent_gpu, UVM_FAULT_REPLAY_TYPE_START, batch_context);
+        //         if (status != NV_OK)
+        //             break;
+        //         ++num_replays;
+        //         ++batch_context->batch_id;  // now == 1, won't re-trigger this path
+        //         ++num_batches;
+        //         continue;                   // go back, fetch again — GPU has new entries
+        //     }
+        //     break;  // original path: genuinely empty buffer
+        // }
 
         if (batch_context->num_cached_faults == 0)
             break;
@@ -3043,6 +3073,7 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
             break;
         }
 
+        // Driver sends command to replay faults
         if (replayable_faults->replay_policy == UVM_PERF_FAULT_REPLAY_POLICY_BATCH) {
             status = push_replay_on_parent_gpu(parent_gpu, UVM_FAULT_REPLAY_TYPE_START, batch_context);
             if (status != NV_OK)
@@ -3074,13 +3105,15 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
         for (vs = 0; vs < batch_context->num_va_spaces_in_batch; vs++) {
             uvm_va_space_t *vs_space = batch_context->per_va_space_faults[vs].va_space;
             if (vs_space) {
-                printk(KERN_INFO "[NVIDIA-UVM CUSTOM BATCH STATS] batch_id=%u pid=%d comm=%s raw=%u coalesced=%u unique=%u\n",
-                               batch_context->batch_id,
-                               vs_space->pid,
-                               vs_space->comm,
-                               batch_context->per_va_space_faults[vs].raw_faults,
-                               batch_context->per_va_space_faults[vs].coalesced_faults,
-                               batch_context->per_va_space_faults[vs].unique_faults);
+                printk(KERN_INFO "NVIDIA-UVM CUSTOM: STATS > service_id=%u batch_id=%u pid=%d comm=%s raw=%u coalesced=%u unique=%u time_us=%llu\n",
+                            batch_context->service_id,
+                            batch_context->batch_id,
+                            vs_space->pid,
+                            vs_space->comm,
+                            batch_context->per_va_space_faults[vs].raw_faults,
+                            batch_context->per_va_space_faults[vs].coalesced_faults,
+                            batch_context->per_va_space_faults[vs].unique_faults,
+                            ktime_get_ns() / 1000);
             }
         }
         ++num_batches;
@@ -3094,9 +3127,9 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
     if ((status == NV_OK && replayable_faults->replay_policy == UVM_PERF_FAULT_REPLAY_POLICY_ONCE) ||
         num_replays == 0)
         status = push_replay_on_parent_gpu(parent_gpu, UVM_FAULT_REPLAY_TYPE_START, batch_context);
-
-    uvm_tracker_deinit(&batch_context->tracker);
-
+    // we will always replay atleast once
+    uvm_tracker_deinit(&batch_context->tracker); // deinitialize tracker
+    // added va_block trackers like uvm_tracker_add_push_safe(), uvm_tracker_add_tracker_safe()
     if (status != NV_OK)
         UVM_DBG_PRINT("Error servicing replayable faults on GPU: %s\n", uvm_parent_gpu_name(parent_gpu));
 }

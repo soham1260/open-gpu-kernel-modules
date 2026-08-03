@@ -343,6 +343,9 @@ struct uvm_fault_service_batch_context_struct
     // Unique id (per-GPU) generated for tools events recording
     NvU32 batch_id;
 
+    // Counter for total service calls
+    NvU32 service_id;
+
     uvm_tracker_t tracker;
 
     // Boolean used to avoid sorting the fault batch by instance_ptr if we
