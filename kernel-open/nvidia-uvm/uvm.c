@@ -39,6 +39,7 @@
 #include "uvm_mem.h"
 #include "uvm_kvmalloc.h"
 #include "uvm_test_file.h"
+#include "uvm_netlink.h"
 
 #define NVIDIA_UVM_DEVICE_NAME          "nvidia-uvm"
 
@@ -1193,6 +1194,13 @@ static int uvm_init(void)
         goto error;
     }
 
+    ret = uvm_netlink_init();
+    if (ret != 0) 
+    {
+        UVM_ERR_PRINT("uvm_netlink_init() failed: %d\n", ret);
+        goto error;
+    }
+
     if (uvm_enable_builtin_tests)
         UVM_INFO_PRINT("Built-in UVM tests are enabled. This is a security risk.\n");
 
@@ -1217,6 +1225,7 @@ static int __init uvm_init_entry(void)
 
 static void uvm_exit(void)
 {
+    uvm_netlink_exit();
     uvm_tools_exit();
     uvm_chardev_exit();
 

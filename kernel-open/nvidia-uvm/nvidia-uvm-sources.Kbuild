@@ -2,6 +2,7 @@ NVIDIA_UVM_SOURCES ?=
 NVIDIA_UVM_SOURCES_CXX ?=
 
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_common.c
+NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_netlink.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_linux.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/nvstatus.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/nvCpuUuid.c

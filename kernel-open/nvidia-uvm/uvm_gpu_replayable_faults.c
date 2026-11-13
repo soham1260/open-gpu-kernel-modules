@@ -39,6 +39,7 @@
 #include "uvm_gpu_non_replayable_faults.h"
 #include "uvm_ats_faults.h"
 #include "uvm_test.h"
+#include "uvm_netlink.h"
 
 // The documentation at the beginning of uvm_gpu_non_replayable_faults.c
 // provides some background for understanding replayable faults, non-replayable
@@ -2296,6 +2297,7 @@ done:
 // scan.
 //
 // Fatal faults are marked for later processing by the caller.
+int batch_number = 0;
 static NV_STATUS service_fault_batch(uvm_parent_gpu_t *parent_gpu,
                                      fault_service_mode_t service_mode,
                                      uvm_fault_service_batch_context_t *batch_context)
@@ -2323,6 +2325,11 @@ static NV_STATUS service_fault_batch(uvm_parent_gpu_t *parent_gpu,
 
         UVM_ASSERT(current_entry->va_space);
 
+        // if (strcmp(current_entry->va_space->comm, "a.out") != 0 && batch_number <= 5) {
+        //     i++;
+        //     continue;
+        // }
+
         if (current_entry->va_space != va_space) {
             if (prev_gpu_va_space) {
                 // TLB entries are invalidated per GPU VA space
@@ -2345,7 +2352,6 @@ static NV_STATUS service_fault_batch(uvm_parent_gpu_t *parent_gpu,
             }
 
             va_space = current_entry->va_space;
-
             // ... and take the lock of the new one
 
             // If an mm is registered with the VA space, we have to retain it
@@ -2986,12 +2992,16 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
     uvm_tracker_init(&batch_context->tracker);
     ++batch_context->service_id;
 
+    batch_number = 0;
     // Process all faults in the buffer
     while (1) {
+        batch_number++;
+        NvU64 batch_start_time_ns = ktime_get_ns();
         if (num_throttled >= uvm_perf_fault_max_throttle_per_service ||
             num_batches >= uvm_perf_fault_max_batches_per_service) {
             break;
         }
+        // msleep(100); 
         // Get and put can be literally thousands of entries apart
         // In a batch we can only 256 fault entries at a time and a bottom half at a time will process uvm_perf_fault_max_batches_per_service
         batch_context->num_invalid_prefetch_faults = 0;
@@ -3087,7 +3097,7 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
                 batch_context->num_cached_faults * replayable_faults->replay_update_put_ratio) {
                 flush_mode = UVM_GPU_BUFFER_FLUSH_MODE_UPDATE_PUT;
             }
-
+            // There is a push_replay_on_parent_gpu() inside fault_buffer_flush_locked() at the very end
             status = fault_buffer_flush_locked(parent_gpu, NULL, flush_mode, UVM_FAULT_REPLAY_TYPE_START, batch_context);
             if (status != NV_OK)
                 break;
@@ -3105,15 +3115,31 @@ void uvm_parent_gpu_service_replayable_faults(uvm_parent_gpu_t *parent_gpu)
         for (vs = 0; vs < batch_context->num_va_spaces_in_batch; vs++) {
             uvm_va_space_t *vs_space = batch_context->per_va_space_faults[vs].va_space;
             if (vs_space) {
-                printk(KERN_INFO "NVIDIA-UVM CUSTOM: STATS > service_id=%u batch_id=%u pid=%d comm=%s raw=%u coalesced=%u unique=%u time_us=%llu\n",
-                            batch_context->service_id,
-                            batch_context->batch_id,
-                            vs_space->pid,
-                            vs_space->comm,
-                            batch_context->per_va_space_faults[vs].raw_faults,
-                            batch_context->per_va_space_faults[vs].coalesced_faults,
-                            batch_context->per_va_space_faults[vs].unique_faults,
-                            ktime_get_ns() / 1000);
+                // printk(KERN_INFO "NVIDIA-UVM CUSTOM: STATS > service_id=%u batch_id=%u pid=%d comm=%s raw=%u coalesced=%u unique=%u time_us=%llu curr_time_us=%llu\n",
+                //             batch_context->service_id,
+                //             batch_context->batch_id,
+                //             vs_space->pid,
+                //             vs_space->comm,
+                //             batch_context->per_va_space_faults[vs].raw_faults,
+                //             batch_context->per_va_space_faults[vs].coalesced_faults,
+                //             batch_context->per_va_space_faults[vs].unique_faults,
+                //             (ktime_get_ns() - batch_start_time_ns) / 1000,
+                //             ktime_get_ns() / 1000
+                //         );
+
+                // struct uvm_fault_stat_msg stat;
+                // stat.service_id = batch_context->service_id;
+                // stat.batch_id = batch_context->batch_id;
+                // stat.pid = vs_space->pid;
+                // stat.raw_faults = batch_context->per_va_space_faults[vs].raw_faults;
+                // stat.coalesced_faults = batch_context->per_va_space_faults[vs].coalesced_faults;
+                // stat.unique_faults = batch_context->per_va_space_faults[vs].unique_faults;
+                // stat.time_us = ktime_get_ns() / 1000;
+                // stat.batch_processing_time_us = (ktime_get_ns() - batch_start_time_ns) / 1000;
+                // strncpy(stat.comm, vs_space->comm, sizeof(stat.comm));
+                // stat.comm[sizeof(stat.comm) - 1] = '\0';
+                
+                // send_uvm_fault_stat(&stat);
             }
         }
         ++num_batches;
